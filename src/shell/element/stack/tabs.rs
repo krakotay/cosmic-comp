@@ -1,22 +1,25 @@
 use super::tab::{MIN_ACTIVE_TAB_WIDTH, Tab, TabBackgroundTheme, TabMessage, TabRuleTheme};
 use cosmic::{
     Apply,
-    iced::{Element, id::Id, widget},
-    iced_core::{
-        Background, Border, Clipboard, Color, Length, Point, Rectangle, Renderer, Shell, Size,
-        Vector, event,
-        layout::{Layout, Limits, Node},
-        mouse, overlay, renderer,
-        widget::{
-            Widget,
-            operation::{
-                Operation, Scrollable,
-                scrollable::{AbsoluteOffset, RelativeOffset},
+    iced::{
+        Element,
+        core::{
+            Background, Border, Clipboard, Color, Length, Point, Rectangle, Renderer, Shell, Size,
+            Vector, event,
+            layout::{Layout, Limits, Node},
+            mouse, overlay, renderer,
+            widget::{
+                Widget,
+                operation::{
+                    Operation, Scrollable,
+                    scrollable::{AbsoluteOffset, RelativeOffset},
+                },
+                tree::{self, Tree},
             },
-            tree::{self, Tree},
         },
+        id::Id,
+        widget::{self, container::draw_background},
     },
-    iced_widget::container::draw_background,
     theme,
     widget::{container::Catalog, icon::from_name},
 };
@@ -379,8 +382,8 @@ where
                 >= MIN_ACTIVE_TAB_WIDTH
             {
                 // just use a flex layout
-                cosmic::iced_core::layout::flex::resolve(
-                    cosmic::iced_core::layout::flex::Axis::Horizontal,
+                cosmic::iced::core::layout::flex::resolve(
+                    cosmic::iced::core::layout::flex::Axis::Horizontal,
                     renderer,
                     &limits,
                     self.width,

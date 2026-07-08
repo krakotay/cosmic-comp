@@ -26,10 +26,13 @@ use crate::{
 use calloop::LoopHandle;
 use cosmic::{
     Apply, Element as CosmicElement, Theme,
-    iced::{Alignment, id::Id, widget as iced_widget},
-    iced_core::{Background, Border, Color, Length, border::Radius},
-    iced_runtime::Task,
-    iced_widget::scrollable::AbsoluteOffset,
+    iced::{
+        Alignment,
+        core::{Background, Border, Color, Length, border::Radius},
+        id::Id,
+        runtime::Task,
+        widget::{self as iced_widget, scrollable::AbsoluteOffset},
+    },
     theme, widget as cosmic_widget,
 };
 use cosmic_comp_config::AppearanceConfig;
@@ -1372,8 +1375,8 @@ impl Decorations<CosmicStackInternal, Message> for DefaultDecorations {
 
                 iced_widget::container::Style {
                     snap: true,
-                    icon_color: Some(cosmic_theme.background.on.into()),
-                    text_color: Some(cosmic_theme.background.on.into()),
+                    icon_color: Some(cosmic_theme.background(theme.transparent).on.into()),
+                    text_color: Some(cosmic_theme.background(theme.transparent).on.into()),
                     background: Some(Background::Color(background.into())),
                     border: Border {
                         radius,
