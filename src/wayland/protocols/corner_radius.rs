@@ -7,6 +7,7 @@ use cosmic_protocols::corner_radius::v1::server::{
 use smithay::utils::HookId;
 use smithay::wayland::compositor::Cacheable;
 use smithay::wayland::compositor::add_pre_commit_hook;
+use smithay::wayland::compositor::remove_pre_commit_hook;
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 use smithay::{
@@ -120,6 +121,10 @@ where
             cosmic_corner_radius_manager_v1::Request::GetCornerRadius { id, toplevel } => {
                 if let Some(surface) = state.xdg_shell_state().get_toplevel(&toplevel) {
                     create_xdg_corner_radius::<D>(resource, id, surface.wl_surface(), data_init);
+                } else {
+                    // The toplevel is not known (e.g. already destroyed); every `New` resource
+                    // must still be initialized, so create an inert object.
+                    init_inert(id, data_init);
                 }
             }
             cosmic_corner_radius_manager_v1::Request::GetCornerRadiusSurface { id, surface } => {
@@ -128,6 +133,7 @@ where
                         cosmic_corner_radius_manager_v1::Error::NoRole as u32,
                         "xdg_surface has no active toplevel or popup role",
                     );
+                    init_inert(id, data_init);
                     return;
                 };
                 create_xdg_corner_radius::<D>(resource, id, &surface, data_init);
@@ -135,6 +141,8 @@ where
             cosmic_corner_radius_manager_v1::Request::GetCornerRadiusLayer { id, layer } => {
                 if let Some(surface) = state.layer_wl_surface(&layer) {
                     create_layer_corner_radius(resource, id, &surface, data_init);
+                } else {
+                    init_inert(id, data_init);
                 }
             }
             _ => unreachable!(),
@@ -152,6 +160,25 @@ where
     }
 }
 
+/// Initializes an inert corner-radius object.
+///
+/// Every `New` resource has to be initialized, even on protocol-error paths,
+/// as failing to do so panics inside wayland-server.
+fn init_inert<D, I>(id: New<I>, data_init: &mut DataInit<'_, D>)
+where
+    D: Dispatch<I, CornerRadiusData> + 'static,
+    I: Resource + 'static,
+{
+    data_init.init(
+        id,
+        Mutex::new(CornerRadiusInternal {
+            surface: None,
+            corners: None,
+            padding: None,
+        }),
+    );
+}
+
 fn create_xdg_corner_radius<D>(
     manager: &cosmic_corner_radius_manager_v1::CosmicCornerRadiusManagerV1,
     id: New<CosmicCornerRadiusToplevelV1>,
@@ -160,25 +187,40 @@ fn create_xdg_corner_radius<D>(
 ) where
     D: Dispatch<CosmicCornerRadiusToplevelV1, CornerRadiusData> + CornerRadiusHandler + 'static,
 {
-    let radius_exists = with_states(surface, |surface_data| {
+    // Take out any previous hook. If its object is still alive, creating a
+    // second corner-radius object for the surface is a protocol error.
+    let previous_hook = with_states(surface, |surface_data| {
         let hook = surface_data
             .data_map
             .get_or_insert_threadsafe(|| ToplevelHookId::new(None));
-        hook.lock()
-            .unwrap()
+        let mut guard = hook.lock().unwrap();
+        if guard
             .as_ref()
             .is_some_and(|(_, object)| object.upgrade().is_ok())
+        {
+            Err(())
+        } else {
+            Ok(guard.take())
+        }
     });
-    if radius_exists {
-        manager.post_error(
-            cosmic_corner_radius_manager_v1::Error::CornerRadiusExists as u32,
-            format!("{manager:?} corner-radius object already exists for the surface"),
-        );
-        return;
+    let previous_hook = match previous_hook {
+        Ok(previous_hook) => previous_hook,
+        Err(()) => {
+            manager.post_error(
+                cosmic_corner_radius_manager_v1::Error::CornerRadiusExists as u32,
+                format!("{manager:?} corner-radius object already exists for the surface"),
+            );
+            init_inert(id, data_init);
+            return;
+        }
+    };
+    // The previous object is dead; unregister its stale hook before adding a new one.
+    if let Some((hook_id, _)) = previous_hook {
+        remove_pre_commit_hook(surface, &hook_id);
     }
 
     let data = Mutex::new(CornerRadiusInternal {
-        surface: surface.downgrade(),
+        surface: Some(surface.downgrade()),
         corners: None,
         padding: None,
     });
@@ -245,11 +287,12 @@ fn create_layer_corner_radius<D>(
             cosmic_corner_radius_manager_v1::Error::CornerRadiusExists as u32,
             format!("{manager:?} corner-radius object already exists for the layer surface"),
         );
+        init_inert(id, data_init);
         return;
     }
 
     let data = Mutex::new(CornerRadiusInternal {
-        surface: surface.downgrade(),
+        surface: Some(surface.downgrade()),
         corners: None,
         padding: None,
     });
@@ -286,19 +329,23 @@ where
                 let mut guard = data.lock().unwrap();
                 guard.corners = None;
 
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     return;
                 };
 
-                with_states(&surface, |surface_data| {
-                    if let Some(hook) = surface_data.data_map.get::<ToplevelHookId>() {
-                        *hook.lock().unwrap() = None;
-                    }
+                let hook = with_states(&surface, |surface_data| {
                     *surface_data
                         .cached_state
                         .get::<CacheableCorners>()
                         .pending() = CacheableCorners(None);
+                    surface_data
+                        .data_map
+                        .get::<ToplevelHookId>()
+                        .and_then(|hook| hook.lock().unwrap().take())
                 });
+                if let Some((hook_id, _)) = hook {
+                    remove_pre_commit_hook(&surface, &hook_id);
+                }
                 drop(guard);
 
                 state.unset_corner_radius(data);
@@ -311,7 +358,7 @@ where
             } => {
                 let mut guard = data.lock().unwrap();
                 guard.set_corner_radius(top_left, top_right, bottom_right, bottom_left);
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     resource.post_error(
                         cosmic_corner_radius_toplevel_v1::Error::ToplevelDestroyed as u32,
                         format!("{resource:?} associated xdg_surface was destroyed"),
@@ -332,7 +379,7 @@ where
             cosmic_corner_radius_toplevel_v1::Request::UnsetRadius => {
                 let mut guard = data.lock().unwrap();
                 guard.corners = None;
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     resource.post_error(
                         cosmic_corner_radius_toplevel_v1::Error::ToplevelDestroyed as u32,
                         format!("{resource:?} associated xdg_surface was destroyed"),
@@ -376,7 +423,7 @@ where
                 let mut guard = data.lock().unwrap();
                 guard.corners = None;
                 guard.padding = None;
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     return;
                 };
                 with_states(&surface, |surface_data| {
@@ -403,7 +450,7 @@ where
             } => {
                 let mut guard = data.lock().unwrap();
                 guard.set_corner_radius(top_left, top_right, bottom_right, bottom_left);
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     resource.post_error(
                         cosmic_corner_radius_layer_v1::Error::LayerDestroyed as u32,
                         format!("{resource:?} associated layer surface was destroyed"),
@@ -422,7 +469,7 @@ where
             cosmic_corner_radius_layer_v1::Request::UnsetRadius => {
                 let mut guard = data.lock().unwrap();
                 guard.corners = None;
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     resource.post_error(
                         cosmic_corner_radius_layer_v1::Error::LayerDestroyed as u32,
                         format!("{resource:?} associated layer surface was destroyed"),
@@ -451,7 +498,7 @@ where
                     bottom,
                     left,
                 });
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     resource.post_error(
                         cosmic_corner_radius_layer_v1::Error::LayerDestroyed as u32,
                         format!("{resource:?} associated layer surface was destroyed"),
@@ -470,7 +517,7 @@ where
             cosmic_corner_radius_layer_v1::Request::UnsetPadding => {
                 let mut guard = data.lock().unwrap();
                 guard.padding = None;
-                let Ok(surface) = guard.surface.upgrade() else {
+                let Some(surface) = guard.wl_surface() else {
                     resource.post_error(
                         cosmic_corner_radius_layer_v1::Error::LayerDestroyed as u32,
                         format!("{resource:?} associated layer surface was destroyed"),
@@ -495,7 +542,8 @@ pub type CornerRadiusData = Mutex<CornerRadiusInternal>;
 
 #[derive(Debug)]
 pub struct CornerRadiusInternal {
-    pub surface: Weak<WlSurface>,
+    /// The associated surface. `None` for inert objects created on error paths.
+    pub surface: Option<Weak<WlSurface>>,
     pub corners: Option<Corners>,
     pub padding: Option<Padding>,
 }
@@ -541,6 +589,10 @@ impl Cacheable for CacheablePadding {
 }
 
 impl CornerRadiusInternal {
+    pub fn wl_surface(&self) -> Option<WlSurface> {
+        self.surface.as_ref().and_then(|s| s.upgrade().ok())
+    }
+
     fn set_corner_radius(
         &mut self,
         top_left: u32,

@@ -63,7 +63,7 @@ impl CornerRadiusHandler for State {
 fn force_redraw(state: &mut State, data: &CornerRadiusData) -> Option<()> {
     let guard = data.lock().unwrap();
 
-    let surface = guard.surface.upgrade().ok()?;
+    let surface = guard.wl_surface()?;
 
     let guard = state.common.shell.read();
     let output = guard.visible_output_for_surface(&surface)?;

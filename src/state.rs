@@ -684,7 +684,7 @@ impl State {
         AlphaModifierState::new::<Self>(dh);
         SinglePixelBufferState::new::<Self>(dh);
         FixesState::new::<Self>(dh);
-        let keyboard_layout_state = KeyboardLayoutState::new::<State, _>(&dh, client_not_sandboxed);
+        let keyboard_layout_state = KeyboardLayoutState::new::<State, _>(dh, client_not_sandboxed);
 
         let idle_notifier_state = IdleNotifierState::<Self>::new(dh, handle.clone());
         let idle_inhibit_manager_state = IdleInhibitManagerState::new::<State>(dh);
