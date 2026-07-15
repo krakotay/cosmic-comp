@@ -1926,6 +1926,7 @@ impl State {
 
                 // is this a released (triggered) modifier-only binding?
                 if binding.key.is_none()
+                    && binding.keycode.is_none()
                     && event.state() == KeyState::Released
                     && !cosmic_modifiers_eq_smithay(&binding.modifiers, modifiers)
                     && modifiers_queue.take(binding)
@@ -1939,6 +1940,7 @@ impl State {
 
                 // could this potentially become a modifier-only binding?
                 if binding.key.is_none()
+                    && binding.keycode.is_none()
                     && event.state() == KeyState::Pressed
                     && cosmic_modifiers_eq_smithay(&binding.modifiers, modifiers)
                 {
