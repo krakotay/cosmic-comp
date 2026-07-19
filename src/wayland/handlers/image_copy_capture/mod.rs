@@ -338,6 +338,7 @@ impl ImageCopyCaptureHandler for State {
             ImageCaptureSourceKind::Output(weak) => {
                 if let Some(mut output) = weak.upgrade() {
                     output.remove_session(&session);
+                    output.remove_session_frames(&session);
                 }
             }
             ImageCaptureSourceKind::Workspace(handle) => {

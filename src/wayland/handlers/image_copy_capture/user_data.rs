@@ -54,6 +54,7 @@ pub trait SessionHolder {
 pub trait FrameHolder {
     fn add_frame(&mut self, session: SessionRef, frame: Frame);
     fn remove_frame(&mut self, frame: &FrameRef);
+    fn remove_session_frames(&mut self, session: &SessionRef);
     fn take_pending_frames(&self) -> Vec<(SessionRef, Frame)>;
 }
 
@@ -129,16 +130,26 @@ impl FrameHolder for Output {
     fn add_frame(&mut self, session: SessionRef, frame: Frame) {
         self.user_data()
             .insert_if_missing_threadsafe(PendingImageCopyBuffers::default);
-        self.user_data()
+        let mut pending = self
+            .user_data()
             .get::<PendingImageCopyBuffers>()
             .unwrap()
             .lock()
-            .unwrap()
-            .push((session, frame));
+            .unwrap();
+        pending.retain(|(pending_session, _)| pending_session != &session);
+        pending.push((session, frame));
     }
     fn remove_frame(&mut self, frame: &FrameRef) {
         if let Some(pending) = self.user_data().get::<PendingImageCopyBuffers>() {
             pending.lock().unwrap().retain(|(_, f)| f != frame);
+        }
+    }
+    fn remove_session_frames(&mut self, session: &SessionRef) {
+        if let Some(pending) = self.user_data().get::<PendingImageCopyBuffers>() {
+            pending
+                .lock()
+                .unwrap()
+                .retain(|(pending_session, _)| pending_session != session);
         }
     }
     fn take_pending_frames(&self) -> Vec<(SessionRef, Frame)> {

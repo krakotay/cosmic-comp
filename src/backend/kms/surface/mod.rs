@@ -655,6 +655,7 @@ fn surface_thread(
                 }
             }
             Event::Closed | Event::Msg(ThreadCommand::End) => {
+                state.prepare_for_drop();
                 signal.stop();
                 signal.wakeup();
             }
@@ -669,6 +670,7 @@ impl SurfaceThreadState {
     fn suspend(&mut self, tx: SyncSender<()>) {
         self.active.store(false, Ordering::SeqCst);
         let _ = self.compositor.take();
+        self.cleanup_renderer_caches();
 
         match std::mem::replace(&mut self.state, QueueState::Idle) {
             QueueState::Idle => {}
@@ -738,9 +740,37 @@ impl SurfaceThreadState {
     }
 
     fn node_removed(&mut self, node: DrmNode) {
+        self.postprocess_textures.remove(&node);
+        if let Ok(mut renderer) = self.api.single_renderer(&node)
+            && let Err(err) = renderer.cleanup_texture_cache()
+        {
+            warn!(?err, ?node, "Failed to drain renderer before removing node");
+        }
         self.api.as_mut().remove_node(&node);
         // force enumeration
         let _ = self.api.devices();
+    }
+
+    fn cleanup_renderer_caches(&mut self) {
+        match self.api.devices_mut() {
+            Ok(devices) => {
+                for device in devices {
+                    if let Err(err) = device.renderer_mut().cleanup_texture_cache() {
+                        warn!(?err, "Failed to drain surface renderer cleanup queue");
+                    }
+                }
+            }
+            Err(err) => warn!(
+                ?err,
+                "Failed to enumerate surface render devices for cleanup"
+            ),
+        }
+    }
+
+    fn prepare_for_drop(&mut self) {
+        self.compositor.take();
+        self.postprocess_textures.clear();
+        self.cleanup_renderer_caches();
     }
 
     #[profiling::function]

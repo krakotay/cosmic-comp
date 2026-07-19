@@ -20,7 +20,7 @@ use smithay::{
         egl::{EGLContext, EGLDevice, EGLDisplay},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::{glow::GlowRenderer, multigpu::GpuManager},
+        renderer::{Renderer, glow::GlowRenderer, multigpu::GpuManager},
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, primary_gpu},
     },
@@ -478,7 +478,11 @@ impl KmsState {
 
         if let Some(node) = *primary_node {
             info!("Using {} as primary gpu for rendering.", node);
-            self.software_renderer.take();
+            if let Some(mut renderer) = self.software_renderer.take()
+                && let Err(err) = renderer.cleanup_texture_cache()
+            {
+                debug!(?err, "Failed to drain software renderer before removal");
+            }
         } else if self.software_renderer.is_none() {
             info!("Failed to find a suitable gpu, using software renderingr");
             self.software_renderer = match software_renderer() {

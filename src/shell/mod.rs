@@ -611,6 +611,14 @@ impl WorkspaceSet {
             self.workspaces[self.active].refresh();
         }
         self.sticky_layer.refresh();
+        self.cleanup_minimized_windows();
+    }
+
+    fn cleanup_minimized_windows(&mut self) {
+        self.minimized_windows.retain(|window| window.alive());
+        for workspace in &mut self.workspaces {
+            workspace.minimized_windows.retain(|window| window.alive());
+        }
     }
 
     fn add_empty_workspace(&mut self, state: &mut WorkspaceUpdateGuard<State>) {
@@ -929,6 +937,9 @@ impl Workspaces {
             return;
         }
 
+        if let Some(zoom_state) = output.user_data().get::<Mutex<OutputZoomState>>() {
+            zoom_state.lock().unwrap().output_leave(output);
+        }
         if let Some(set) = self.sets.shift_remove(output) {
             {
                 let map = layer_map_for_output(output);
@@ -1317,6 +1328,9 @@ impl Workspaces {
         for set in self.sets.values_mut() {
             set.refresh()
         }
+        if let Some(set) = self.backup_set.as_mut() {
+            set.cleanup_minimized_windows();
+        }
     }
 
     pub fn get(&self, num: usize, output: &Output) -> Option<&Workspace> {
@@ -1538,7 +1552,7 @@ impl Common {
             .insert_if_missing_threadsafe(|| OutputId(next_output_id()));
 
         if let Some(state) = shell.zoom_state.as_ref() {
-            output.user_data().insert_if_missing_threadsafe(|| {
+            let inserted = output.user_data().insert_if_missing_threadsafe(|| {
                 Mutex::new(OutputZoomState::new(
                     &state.seat,
                     output,
@@ -1549,6 +1563,15 @@ impl Common {
                     shell.theme.clone(),
                 ))
             });
+            if !inserted {
+                output
+                    .user_data()
+                    .get::<Mutex<OutputZoomState>>()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .output_enter(output);
+            }
         }
 
         std::mem::drop(shell);

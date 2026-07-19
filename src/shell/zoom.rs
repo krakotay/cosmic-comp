@@ -77,24 +77,21 @@ impl OutputZoomState {
         theme.transparent = theme.cosmic().frosted_system_interface;
         let cursor_position = seat.get_pointer().unwrap().current_location().as_global();
         let focal_point = cursor_position.to_local(output);
-        let output_geometry = output.geometry().to_f64();
 
         let program = ZoomProgram::new(level, movement, increment);
         let element = IcedElement::new(program, Size::default(), loop_handle, theme);
-        let mut size = element.minimum_size();
-        size.w = size.w.min(output_geometry.size.w.round() as i32);
         element.set_activate(true);
-        element.resize(size);
-        element.output_enter(output, Rectangle::new(Point::from((0, 0)), size));
         element.set_additional_scale(level.min(4.));
 
-        OutputZoomState {
+        let state = OutputZoomState {
             level,
             previous_level: None,
             focal_point,
             previous_point: None,
             element,
-        }
+        };
+        state.output_enter(output);
+        state
     }
 
     pub fn animating_focal_point(&mut self) -> Point<f64, Local> {
@@ -121,6 +118,21 @@ impl OutputZoomState {
 
     pub fn current_focal_point(&mut self) -> Point<f64, Local> {
         self.focal_point
+    }
+
+    pub fn output_leave(&self, output: &Output) {
+        SpaceElement::output_leave(&self.element, output);
+    }
+
+    pub fn output_enter(&self, output: &Output) {
+        let mut size = self.element.minimum_size();
+        size.w = size.w.min(output.geometry().to_f64().size.w.round() as i32);
+        self.element.resize(size);
+        SpaceElement::output_enter(
+            &self.element,
+            output,
+            Rectangle::new(Point::from((0, 0)), size),
+        );
     }
 
     pub fn current_level(&self) -> f64 {
