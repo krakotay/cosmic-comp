@@ -1028,12 +1028,10 @@ impl Common {
         });
 
         // layer surfaces
-        for o in shell.outputs() {
-            let namespace = shell.workspaces.active_num(o).1;
-            let map = smithay::desktop::layer_map_for_output(o);
-            for layer_surface in map.layers() {
-                layer_surface.with_surfaces(processor(Some(namespace)));
-            }
+        let namespace = shell.workspaces.active_num(output).1;
+        let map = smithay::desktop::layer_map_for_output(output);
+        for layer_surface in map.layers() {
+            layer_surface.with_surfaces(processor(Some(namespace)));
         }
     }
 

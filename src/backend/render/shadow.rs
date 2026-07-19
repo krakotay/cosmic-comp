@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, cell::RefCell, collections::HashMap};
+use std::{borrow::Borrow, cell::RefCell};
 
 use glam::{Affine2, Mat3, Vec2};
 use smithay::{
@@ -12,7 +12,7 @@ use smithay::{
 };
 
 use crate::{
-    backend::render::element::AsGlowRenderer,
+    backend::render::{RendererCache, element::AsGlowRenderer},
     shell::element::CosmicMappedKey,
     utils::prelude::{Local, RectLocalExt},
 };
@@ -28,7 +28,7 @@ pub struct ShadowParameters {
     radius: [u8; 4],
     dark_mode: bool,
 }
-type ShadowCache = RefCell<HashMap<CosmicMappedKey, (ShadowParameters, PixelShaderElement)>>;
+type ShadowCache = RefCell<RendererCache<CosmicMappedKey, (ShadowParameters, PixelShaderElement)>>;
 
 impl ShadowShader {
     pub fn get<R: AsGlowRenderer>(renderer: &R) -> GlesPixelProgram {
@@ -70,9 +70,9 @@ impl ShadowShader {
             .egl_context()
             .user_data();
 
-        user_data.insert_if_missing(|| ShadowCache::new(HashMap::new()));
+        user_data.insert_if_missing(|| ShadowCache::new(RendererCache::default()));
         let mut cache = user_data.get::<ShadowCache>().unwrap().borrow_mut();
-        cache.retain(|k, _| k.alive());
+        cache.remove_stale(IsAlive::alive);
 
         if cache
             .get(&key)

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::unix::{
         io::{AsFd, BorrowedFd, FromRawFd, RawFd},
         net::UnixStream,
@@ -27,8 +27,9 @@ pub enum Message {
 
 struct StreamWrapper {
     stream: UnixStream,
+    header: [u8; 2],
+    header_read: usize,
     buffer: Vec<u8>,
-    size: u16,
     read_bytes: usize,
 }
 impl AsFd for StreamWrapper {
@@ -40,10 +41,76 @@ impl From<UnixStream> for StreamWrapper {
     fn from(stream: UnixStream) -> StreamWrapper {
         StreamWrapper {
             stream,
+            header: [0; 2],
+            header_read: 0,
             buffer: Vec::new(),
-            size: 0,
             read_bytes: 0,
         }
+    }
+}
+
+impl StreamWrapper {
+    fn read_messages(&mut self, mut on_message: impl FnMut(&[u8])) -> io::Result<bool> {
+        loop {
+            if self.header_read < self.header.len() {
+                match self.stream.read(&mut self.header[self.header_read..]) {
+                    Ok(0) if self.header_read == 0 => return Ok(false),
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "session socket closed in a message header",
+                        ));
+                    }
+                    Ok(read) => self.header_read += read,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(true),
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(err),
+                }
+
+                if self.header_read < self.header.len() {
+                    continue;
+                }
+
+                let size = u16::from_ne_bytes(self.header) as usize;
+                self.buffer.resize(size, 0);
+                self.read_bytes = 0;
+            }
+
+            if self.buffer.is_empty() {
+                on_message(&self.buffer);
+                self.header_read = 0;
+                continue;
+            }
+
+            match self.stream.read(&mut self.buffer[self.read_bytes..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "session socket closed in a message body",
+                    ));
+                }
+                Ok(read) => self.read_bytes += read,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(true),
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+
+            if self.read_bytes == self.buffer.len() {
+                on_message(&self.buffer);
+                self.header_read = 0;
+                self.read_bytes = 0;
+            }
+        }
+    }
+}
+
+fn handle_message(message: &[u8]) {
+    match serde_json::from_slice::<Message>(message) {
+        Ok(Message::SetEnv { .. }) => warn!("Got SetEnv from session? What is this?"),
+        Err(err) => warn!(
+            ?err,
+            "Unknown session socket message, are you using incompatible cosmic-session and cosmic-comp versions?"
+        ),
     }
 }
 
@@ -102,60 +169,101 @@ pub fn run_socket(handle: LoopHandle<State>, common: &Common) -> Result<()> {
             session_socket
                 .write_all(&bytes)
                 .with_context(|| "Failed to write message bytes")?;
+            session_socket
+                .set_nonblocking(true)
+                .with_context(|| "Failed to make the cosmic session socket nonblocking")?;
 
-            handle.insert_source(
-                Generic::new(StreamWrapper::from(session_socket), Interest::READ, Mode::Level),
-                move |_, stream, _state| {
-                    // SAFETY: We don't drop the stream!
-                    let stream = unsafe { stream.get_mut() };
+            handle
+                .insert_source(
+                    Generic::new(
+                        StreamWrapper::from(session_socket),
+                        Interest::READ,
+                        Mode::Level,
+                    ),
+                    move |_, stream, _state| {
+                        // SAFETY: We don't drop the stream!
+                        let stream = unsafe { stream.get_mut() };
 
-                    if stream.size == 0 {
-                        let mut len = [0u8; 2];
-                        match stream.stream.read_exact(&mut len) {
-                            Ok(()) => {
-                                stream.size = u16::from_ne_bytes(len);
-                                stream.buffer = vec![0; stream.size as usize];
-                            },
+                        match stream.read_messages(handle_message) {
+                            Ok(true) => Ok(PostAction::Continue),
+                            Ok(false) => Ok(PostAction::Remove),
                             Err(err) => {
-                                warn!(?err, "Error reading from session socket");
-                                return Ok(PostAction::Remove);
+                                error!(?err, "Error reading from session socket");
+                                Ok(PostAction::Remove)
                             }
                         }
-                    }
-
-                    stream.read_bytes += match stream.stream.read(&mut stream.buffer) {
-                        Ok(size) => size,
-                        Err(err) => {
-                            error!(?err, "Error reading from session socket");
-                            return Ok(PostAction::Remove);
-                        }
-                    };
-
-                    if stream.read_bytes != 0 && stream.read_bytes == stream.size as usize {
-                        stream.size = 0;
-                        stream.read_bytes = 0;
-                        match std::str::from_utf8(&stream.buffer) {
-                            Ok(message) => {
-                                match serde_json::from_str::<'_, Message>(message) {
-                                    Ok(Message::SetEnv { .. }) => warn!("Got SetEnv from session? What is this?"),
-                                    _ => warn!("Unknown session socket message, are you using incompatible cosmic-session and cosmic-comp versions?"),
-                                };
-                                Ok(PostAction::Continue)
-                            },
-                            Err(err) => {
-                                warn!(?err, "Invalid message from session sock");
-                                Ok(PostAction::Continue)
-                            }
-                        }
-                    } else {
-                        Ok(PostAction::Continue)
-                    }
-                },
-            ).with_context(|| "Failed to init the cosmic session socket source")?;
+                    },
+                )
+                .with_context(|| "Failed to init the cosmic session socket source")?;
         } else {
             error!(socket = fd_num, "COSMIC_SESSION_SOCK is no valid RawFd.");
         }
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = u16::try_from(payload.len()).unwrap().to_ne_bytes().to_vec();
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn reads_fragmented_messages_without_blocking() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut stream = StreamWrapper::from(reader);
+        let payload: &[u8] = br#"{"message":"set_env","variables":{"A":"B"}}"#;
+        let framed = frame(payload);
+        let mut messages = Vec::new();
+
+        writer.write_all(&framed[..1]).unwrap();
+        assert!(
+            stream
+                .read_messages(|message| messages.push(message.to_vec()))
+                .unwrap()
+        );
+        assert!(messages.is_empty());
+
+        writer.write_all(&framed[1..5]).unwrap();
+        assert!(
+            stream
+                .read_messages(|message| messages.push(message.to_vec()))
+                .unwrap()
+        );
+        assert!(messages.is_empty());
+
+        writer.write_all(&framed[5..]).unwrap();
+        assert!(
+            stream
+                .read_messages(|message| messages.push(message.to_vec()))
+                .unwrap()
+        );
+        assert_eq!(messages, [payload]);
+    }
+
+    #[test]
+    fn reads_multiple_messages_from_one_ready_event() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut stream = StreamWrapper::from(reader);
+        let first: &[u8] = br#"{"message":"set_env","variables":{}}"#;
+        let second: &[u8] = br#"{"message":"set_env","variables":{"A":"B"}}"#;
+        let mut bytes = frame(first);
+        bytes.extend(frame(second));
+        writer.write_all(&bytes).unwrap();
+
+        let mut messages = Vec::new();
+        assert!(
+            stream
+                .read_messages(|message| messages.push(message.to_vec()))
+                .unwrap()
+        );
+        assert_eq!(messages, [first, second]);
+    }
 }

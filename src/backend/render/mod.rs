@@ -4,9 +4,9 @@ use std::{
     borrow::Borrow,
     cell::RefCell,
     collections::HashMap,
-    ops::ControlFlow,
+    ops::{ControlFlow, Deref, DerefMut},
     sync::{Arc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "debug")]
@@ -131,6 +131,47 @@ pub static POSTPROCESS_SHADER: &str = include_str!("./shaders/offscreen.frag");
 pub static GROUP_COLOR: [f32; 3] = [0.788, 0.788, 0.788];
 pub static ACTIVE_GROUP_COLOR: [f32; 3] = [0.58, 0.922, 0.922];
 
+const RENDERER_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+
+pub(super) struct RendererCache<K, V> {
+    entries: HashMap<K, V>,
+    last_cleanup: Instant,
+}
+
+impl<K, V> Default for RendererCache<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            last_cleanup: Instant::now(),
+        }
+    }
+}
+
+impl<K, V> RendererCache<K, V> {
+    fn remove_stale(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        if self.last_cleanup.elapsed() < RENDERER_CACHE_CLEANUP_INTERVAL {
+            return;
+        }
+
+        self.entries.retain(|key, _| keep(key));
+        self.last_cleanup = Instant::now();
+    }
+}
+
+impl<K, V> Deref for RendererCache<K, V> {
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl<K, V> DerefMut for RendererCache<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
+}
+
 pub struct IndicatorShader(pub GlesPixelProgram);
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -192,7 +233,7 @@ struct IndicatorSettings {
     color: [f32; 3],
     scale: f64,
 }
-type IndicatorCache = RefCell<HashMap<Key, (IndicatorSettings, PixelShaderElement)>>;
+type IndicatorCache = RefCell<RendererCache<Key, (IndicatorSettings, PixelShaderElement)>>;
 
 impl IndicatorShader {
     pub fn get<R: AsGlowRenderer>(renderer: &R) -> GlesPixelProgram {
@@ -254,9 +295,9 @@ impl IndicatorShader {
             .egl_context()
             .user_data();
 
-        user_data.insert_if_missing(|| IndicatorCache::new(HashMap::new()));
+        user_data.insert_if_missing(|| IndicatorCache::new(RendererCache::default()));
         let mut cache = user_data.get::<IndicatorCache>().unwrap().borrow_mut();
-        cache.retain(|k, _| match k {
+        cache.remove_stale(|k| match k {
             Key::Static(w) => w.upgrade().is_some(),
             Key::Group(w) => w.upgrade().is_some(),
             Key::Window(_, w) => w.alive(),
@@ -314,7 +355,7 @@ struct BackdropSettings {
     alpha: f32,
     color: [f32; 3],
 }
-type BackdropCache = RefCell<HashMap<Key, (BackdropSettings, PixelShaderElement)>>;
+type BackdropCache = RefCell<RendererCache<Key, (BackdropSettings, PixelShaderElement)>>;
 
 impl BackdropShader {
     pub fn get<R: AsGlowRenderer>(renderer: &R) -> GlesPixelProgram {
@@ -345,9 +386,9 @@ impl BackdropShader {
             .egl_context()
             .user_data();
 
-        user_data.insert_if_missing(|| BackdropCache::new(HashMap::new()));
+        user_data.insert_if_missing(|| BackdropCache::new(RendererCache::default()));
         let mut cache = user_data.get::<BackdropCache>().unwrap().borrow_mut();
-        cache.retain(|k, _| match k {
+        cache.remove_stale(|k| match k {
             Key::Static(w) => w.upgrade().is_some(),
             Key::Group(a) => a.upgrade().is_some(),
             Key::Window(_, w) => w.alive(),

@@ -74,6 +74,12 @@ use crate::{
 
 static ID: LazyLock<Id> = LazyLock::new(|| Id::new("Program"));
 
+type ScaleBuffer = (
+    Arc<Mutex<MemoryRenderBuffer>>,
+    Option<(Vec<Layer>, Color)>,
+    Option<tiny_skia::Mask>,
+);
+
 pub struct IcedElement<P: Program + Send + 'static>(pub(crate) Arc<Mutex<IcedElementInternal<P>>>);
 
 impl<P: Program + Send + 'static> fmt::Debug for IcedElement<P> {
@@ -178,9 +184,9 @@ pub(crate) struct IcedElementInternal<P: Program + Send + 'static> {
     // draw buffer
     additional_scale: f64,
     outputs: HashSet<Output>,
-    buffers: HashMap<OrderedFloat<f64>, (MemoryRenderBuffer, Option<(Vec<Layer>, Color)>)>,
+    buffers: HashMap<OrderedFloat<f64>, ScaleBuffer>,
     pending_realloc: bool,
-    blur: BlurState,
+    blur: Arc<Mutex<BlurState>>,
 
     // state
     size: Size<i32, Logical>,
@@ -231,9 +237,15 @@ impl<P: Program + Send + Clone + 'static> Clone for IcedElementInternal<P> {
         IcedElementInternal {
             additional_scale: self.additional_scale,
             outputs: self.outputs.clone(),
-            buffers: self.buffers.clone(),
+            buffers: self
+                .buffers
+                .iter()
+                .map(|(scale, (buffer, layers, _))| {
+                    (*scale, (buffer.clone(), layers.clone(), None))
+                })
+                .collect(),
             pending_realloc: self.pending_realloc,
-            blur: BlurState::default(),
+            blur: Arc::new(Mutex::new(BlurState::default())),
             size: self.size,
             last_seat: self.last_seat.clone(),
             cursor_pos: self.cursor_pos,
@@ -319,7 +331,7 @@ impl<P: Program + Send + 'static> IcedElement<P> {
             outputs: HashSet::new(),
             buffers: HashMap::new(),
             pending_realloc: false,
-            blur: BlurState::default(),
+            blur: Arc::new(Mutex::new(BlurState::default())),
             size,
             cursor_pos: None,
             last_seat,
@@ -407,7 +419,7 @@ impl<P: Program + Send + 'static> IcedElement<P> {
 
     pub fn force_redraw(&self) {
         let mut internal = self.0.lock().unwrap();
-        for (_buffer, old_primitives) in internal.buffers.values_mut() {
+        for (_buffer, old_primitives, _clip_mask) in internal.buffers.values_mut() {
             *old_primitives = None;
         }
     }
@@ -861,7 +873,14 @@ impl<P: Program + Send + 'static> SpaceElement for IcedElement<P> {
                 .to_i32_round();
 
             (
-                MemoryRenderBuffer::new(Fourcc::Argb8888, buffer_size, 1, Transform::Normal, None),
+                Arc::new(Mutex::new(MemoryRenderBuffer::new(
+                    Fourcc::Argb8888,
+                    buffer_size,
+                    1,
+                    Transform::Normal,
+                    None,
+                ))),
+                None,
                 None,
             )
         });
@@ -909,13 +928,14 @@ impl<P: Program + Send + 'static> SpaceElement for IcedElement<P> {
             internal_ref.buffers.insert(
                 scale,
                 (
-                    MemoryRenderBuffer::new(
+                    Arc::new(Mutex::new(MemoryRenderBuffer::new(
                         Fourcc::Argb8888,
                         buffer_size,
                         1,
                         Transform::Normal,
                         None,
-                    ),
+                    ))),
+                    None,
                     None,
                 ),
             );
@@ -942,27 +962,49 @@ impl<P: Program + Send + 'static> IcedElement<P> {
         // makes partial borrows easier
         let internal_ref = &mut *internal;
         if std::mem::replace(&mut internal_ref.pending_realloc, false) {
-            for (scale, (buffer, old_primitives)) in internal_ref.buffers.iter_mut() {
+            for (scale, (buffer, old_primitives, clip_mask)) in internal_ref.buffers.iter_mut() {
                 let buffer_size = internal_ref
                     .size
                     .to_f64()
                     .to_buffer(**scale, Transform::Normal)
                     .to_i32_round();
-                buffer.render().resize(buffer_size);
+                buffer.lock().unwrap().render().resize(buffer_size);
                 *old_primitives = None;
+                *clip_mask = None;
             }
         }
 
         scale = scale * internal_ref.additional_scale;
-        if let Some((buffer, old_layers)) = internal_ref.buffers.get_mut(&OrderedFloat(scale.x)) {
-            let size: Size<i32, BufferCoords> = internal_ref
-                .size
-                .to_f64()
-                .to_buffer(scale.x, Transform::Normal)
-                .to_i32_round();
-            if size.w > 0 && size.h > 0 {
+        let scale_key = OrderedFloat(scale.x);
+        let Some(buffer_handle) = internal_ref
+            .buffers
+            .get(&scale_key)
+            .map(|(buffer, _, _)| buffer.clone())
+        else {
+            return;
+        };
+        let mut buffer = buffer_handle.lock().unwrap();
+        let size: Size<i32, BufferCoords> = internal_ref
+            .size
+            .to_f64()
+            .to_buffer(scale.x, Transform::Normal)
+            .to_i32_round();
+        if size.w <= 0 || size.h <= 0 {
+            return;
+        }
+
+        let mut did_draw = false;
+        {
+            let (_, old_layers, clip_mask) = internal_ref.buffers.get_mut(&scale_key).unwrap();
+            if clip_mask
+                .as_ref()
+                .is_none_or(|mask| mask.width() != size.w as u32 || mask.height() != size.h as u32)
+            {
+                *clip_mask = tiny_skia::Mask::new(size.w as u32, size.h as u32);
+            }
+
+            if let Some(clip_mask) = clip_mask.as_mut() {
                 let state_ref = &internal_ref.state;
-                let mut clip_mask = tiny_skia::Mask::new(size.w as u32, size.h as u32).unwrap();
                 let theme = &internal_ref.theme;
 
                 _ = buffer.render().draw(|buf| {
@@ -1009,11 +1051,12 @@ impl<P: Program + Send + 'static> IcedElement<P> {
                     );
 
                     if !damage.is_empty() {
+                        did_draw = true;
                         *old_layers = Some((current_layers.to_vec(), background_color));
 
                         internal_ref.renderer.draw(
                             &mut pixels,
-                            &mut clip_mask,
+                            clip_mask,
                             &viewport,
                             &damage,
                             background_color,
@@ -1040,72 +1083,73 @@ impl<P: Program + Send + 'static> IcedElement<P> {
 
                     Result::<_, ()>::Ok(damage)
                 });
+            }
+        }
 
-                // trim the shape cache
-                {
-                    let mut font_system = font_system().write().unwrap();
-                    font_system.raw().shape_run_cache.trim(1024);
-                }
+        let logical_size = internal_ref
+            .size
+            .to_f64()
+            .upscale(internal_ref.additional_scale)
+            .to_i32_round();
+        let additional_scale = internal_ref.additional_scale;
+        let transparent = internal_ref.theme.transparent;
+        let blur_strength = (internal_ref.theme.cosmic().frosted as u8 + 1) as usize;
+        let blur = internal_ref.blur.clone();
+        std::mem::drop(internal);
+
+        let render_element = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            location.to_f64(),
+            &buffer,
+            Some(alpha),
+            Some(Rectangle::from_size(
+                size.to_f64()
+                    .to_logical(1., Transform::Normal)
+                    .to_i32_round(),
+            )),
+            Some(logical_size),
+            Kind::Unspecified,
+        );
+        std::mem::drop(buffer);
+
+        if did_draw {
+            let mut font_system = font_system().write().unwrap();
+            font_system.raw().shape_run_cache.trim(1024);
+        }
+
+        match render_element {
+            Ok(buffer) => push_above(buffer.into()),
+            Err(err) => tracing::warn!("What? {:?}", err),
+        }
+
+        if transparent {
+            for radius in radii.iter_mut() {
+                *radius = ((*radius as f64) * additional_scale).round() as u8;
             }
 
-            match MemoryRenderBufferRenderElement::from_buffer(
+            match BlurElement::from_state(
                 renderer,
-                location.to_f64(),
-                buffer,
-                Some(alpha),
-                Some(Rectangle::from_size(
-                    size.to_f64()
-                        .to_logical(1., Transform::Normal)
-                        .to_i32_round(),
-                )),
-                Some(
-                    internal_ref
-                        .size
+                &mut blur.lock().unwrap(),
+                Rectangle::new(
+                    location
                         .to_f64()
-                        .upscale(internal_ref.additional_scale)
-                        .to_i32_round(),
+                        .to_logical(scale)
+                        .upscale(additional_scale),
+                    logical_size.to_f64(),
                 ),
-                Kind::Unspecified,
+                scale.x,
+                radii,
+                blur_strength,
             ) {
-                Ok(buffer) => {
-                    push_above(buffer.into());
-                }
-                Err(err) => tracing::warn!("What? {:?}", err),
-            }
-
-            if internal_ref.theme.transparent {
-                for radius in radii.iter_mut() {
-                    *radius = ((*radius as f64) * internal_ref.additional_scale).round() as u8;
-                }
-
-                match BlurElement::from_state(
-                    renderer,
-                    &mut internal_ref.blur,
-                    Rectangle::new(
-                        location
-                            .to_f64()
-                            .to_logical(scale)
-                            .upscale(internal_ref.additional_scale),
-                        internal_ref
-                            .size
-                            .to_f64()
-                            .upscale(internal_ref.additional_scale)
-                            .to_i32_round(),
-                    ),
-                    scale.x,
-                    radii,
-                    (internal_ref.theme.cosmic().frosted as u8 + 1) as usize,
-                ) {
-                    Ok(Some(elem)) => {
-                        if let Some(push_below) = push_below {
-                            push_below(elem.into())
-                        } else {
-                            push_above(elem.into())
-                        }
+                Ok(Some(elem)) => {
+                    if let Some(push_below) = push_below {
+                        push_below(elem.into())
+                    } else {
+                        push_above(elem.into())
                     }
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!("Blur elem error: {:?}", err),
                 }
+                Ok(None) => {}
+                Err(err) => tracing::warn!("Blur elem error: {:?}", err),
             }
         }
     }
