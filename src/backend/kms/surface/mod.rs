@@ -4,7 +4,7 @@ use crate::{
     backend::render::{
         CLEAR_COLOR, CursorMode, GlMultiError, GlMultiRenderer, PostprocessOutputConfig,
         PostprocessShader, PostprocessState,
-        element::{CosmicElement, DamageElement},
+        element::{CosmicElement, DamageElement, PostprocessRenderElement},
         init_shaders, output_elements,
     },
     config::ScreenFilter,
@@ -50,9 +50,7 @@ use smithay::{
                     constrain_render_elements,
                 },
             },
-            gles::{
-                GlesRenderbuffer, GlesRenderer, GlesTexture, Uniform, element::TextureShaderElement,
-            },
+            gles::{GlesRenderbuffer, GlesRenderer, GlesTexture, Uniform},
             glow::GlowRenderer,
             multigpu::{ApiDevice, Error as MultiError, GpuManager},
             sync::SyncPoint,
@@ -918,7 +916,6 @@ impl SurfaceThreadState {
 
             self.queue_redraw(false);
         }
-        self.send_frame_callbacks();
     }
 
     #[profiling::function]
@@ -1115,7 +1112,7 @@ impl SurfaceThreadState {
         // so let's collect everything we need for screencopy now
         let mut has_cursor_mode_none = false;
         let frames = if self.mirroring.is_none() {
-            take_screencopy_frames(&self.output, &elements, &mut has_cursor_mode_none)
+            take_screencopy_frames(&self.output, &mut elements, &mut has_cursor_mode_none)
         } else {
             Default::default()
         };
@@ -1634,7 +1631,7 @@ fn get_surface_dmabuf_feedback(
 
 fn take_screencopy_frames(
     output: &Output,
-    elements: &[CosmicElement<GlMultiRenderer>],
+    elements: &mut Vec<CosmicElement<GlMultiRenderer>>,
     has_cursor_mode_none: &mut bool,
 ) -> Vec<(
     ScreencopySessionRef,
@@ -1645,6 +1642,7 @@ fn take_screencopy_frames(
         .take_pending_frames()
         .into_iter()
         .map(|(session, frame)| {
+            let mut additional_damage_len = 0;
             let additional_damage = frame.damage();
             let session_data = session.user_data().get::<SessionData>().unwrap();
             let mut damage_tracking = session_data.lock().unwrap();
@@ -1667,7 +1665,7 @@ fn take_screencopy_frames(
                     .to_buffer(1, Transform::Normal)
                     .to_f64();
 
-                let additional_damage_elements: Vec<_> = additional_damage
+                let additional_damage_elements = additional_damage
                     .into_iter()
                     .map(|rect| {
                         rect.to_f64()
@@ -1679,13 +1677,14 @@ fn take_screencopy_frames(
                             .to_i32_round()
                     })
                     .map(DamageElement::new)
-                    .collect();
-                let _ = damage_tracking
-                    .dt
-                    .damage_output(age, &additional_damage_elements);
+                    .map(CosmicElement::from)
+                    .collect::<Vec<_>>();
+                additional_damage_len = additional_damage_elements.len();
+                elements.splice(0..0, additional_damage_elements);
             };
 
             let res = damage_tracking.dt.damage_output(age, elements);
+            elements.drain(..additional_damage_len);
 
             if !session.draw_cursor() {
                 *has_cursor_mode_none = true;
@@ -1912,7 +1911,7 @@ fn postprocess_elements<'a>(
         .get::<PostprocessShader>()
         .expect("OffscreenShader should be available through `init_shaders`");
 
-    let mut elements: [Option<TextureShaderElement>; 2] = [None, None];
+    let mut elements: [Option<PostprocessRenderElement>; 2] = [None, None];
     if let Some(cursor_texture) = postprocess_state.cursor_texture.as_ref() {
         let cursor_geometry = pre_postprocess_data.cursor_geometry.unwrap();
         let texture_elem = TextureRenderElement::from_texture_render_buffer(
@@ -1933,7 +1932,7 @@ fn postprocess_elements<'a>(
             Kind::Cursor,
         );
 
-        elements[0] = Some(TextureShaderElement::new(
+        elements[0] = Some(PostprocessRenderElement::new(
             texture_elem,
             postprocess_texture_shader.0.clone(),
             vec![
@@ -1967,7 +1966,7 @@ fn postprocess_elements<'a>(
         ),
         Kind::Unspecified,
     );
-    elements[1] = Some(TextureShaderElement::new(
+    elements[1] = Some(PostprocessRenderElement::new(
         texture_elem,
         postprocess_texture_shader.0.clone(),
         vec![

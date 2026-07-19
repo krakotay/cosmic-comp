@@ -1,3 +1,5 @@
+use std::borrow::BorrowMut;
+
 use crate::{
     backend::{
         kms::render::gles::GbmGlowBackend,
@@ -7,7 +9,6 @@ use crate::{
     utils::iced::IcedRenderElement,
 };
 
-#[cfg(feature = "debug")]
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::{
     backend::{
@@ -19,7 +20,7 @@ use smithay::{
                 Element, Id, Kind, RenderElement, UnderlyingStorage,
                 utils::{CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement},
             },
-            gles::{GlesError, GlesRenderbuffer, GlesTexture, element::TextureShaderElement},
+            gles::{GlesError, GlesFrame, GlesRenderbuffer, GlesTexProgram, GlesTexture, Uniform},
             glow::{GlowFrame, GlowRenderer},
             multigpu::MultiTexture,
             utils::{CommitCounter, DamageSet, OpaqueRegions},
@@ -45,12 +46,105 @@ where
     Dnd(SurfaceRenderElement<R>),
     MoveGrab(RescaleRenderElement<CosmicMappedRenderElement<R>>),
     Postprocess(
-        CropRenderElement<RelocateRenderElement<RescaleRenderElement<TextureShaderElement>>>,
+        CropRenderElement<RelocateRenderElement<RescaleRenderElement<PostprocessRenderElement>>>,
     ),
     Zoom(IcedRenderElement<R>),
     Damage(DamageElement),
     #[cfg(feature = "debug")]
     Egui(TextureRenderElement<GlesTexture>),
+}
+
+#[derive(Debug)]
+pub struct PostprocessRenderElement {
+    inner: TextureRenderElement<GlesTexture>,
+    program: GlesTexProgram,
+    uniforms: Vec<Uniform<'static>>,
+}
+
+impl PostprocessRenderElement {
+    pub fn new(
+        inner: TextureRenderElement<GlesTexture>,
+        program: GlesTexProgram,
+        uniforms: Vec<Uniform<'_>>,
+    ) -> Self {
+        Self {
+            inner,
+            program,
+            uniforms: uniforms.into_iter().map(Uniform::into_owned).collect(),
+        }
+    }
+}
+
+impl Element for PostprocessRenderElement {
+    fn id(&self) -> &Id {
+        self.inner.id()
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.inner.current_commit()
+    }
+
+    fn location(&self, scale: Scale<f64>) -> Point<i32, Physical> {
+        self.inner.location(scale)
+    }
+
+    fn src(&self) -> Rectangle<f64, BufferCoords> {
+        self.inner.src()
+    }
+
+    fn transform(&self) -> smithay::utils::Transform {
+        self.inner.transform()
+    }
+
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.inner.geometry(scale)
+    }
+
+    fn damage_since(
+        &self,
+        scale: Scale<f64>,
+        commit: Option<CommitCounter>,
+    ) -> DamageSet<i32, Physical> {
+        self.inner.damage_since(scale, commit)
+    }
+
+    fn opaque_regions(&self, scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        self.inner.opaque_regions(scale)
+    }
+
+    fn alpha(&self) -> f32 {
+        self.inner.alpha()
+    }
+
+    fn kind(&self) -> Kind {
+        self.inner.kind()
+    }
+}
+
+impl RenderElement<GlowRenderer> for PostprocessRenderElement {
+    fn draw(
+        &self,
+        frame: &mut GlowFrame<'_, '_>,
+        src: Rectangle<f64, BufferCoords>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&UserDataMap>,
+    ) -> Result<(), GlesError> {
+        BorrowMut::<GlesFrame>::borrow_mut(frame)
+            .override_default_tex_program(self.program.clone(), self.uniforms.clone());
+        let result = RenderElement::<GlowRenderer>::draw(
+            &self.inner,
+            frame,
+            src,
+            dst,
+            damage,
+            opaque_regions,
+            cache,
+        );
+        BorrowMut::<GlesFrame>::borrow_mut(frame).clear_tex_program_override();
+        result
+    }
 }
 
 impl<R> Element for CosmicElement<R>

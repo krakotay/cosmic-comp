@@ -195,6 +195,7 @@ impl X11State {
     pub fn update_screen_filter(&mut self, screen_filter: &ScreenFilter) -> Result<()> {
         for surface in &mut self.surfaces {
             surface.screen_filter_state.filter = screen_filter.clone();
+            surface.screen_filter_state.state = None;
         }
         Ok(())
     }

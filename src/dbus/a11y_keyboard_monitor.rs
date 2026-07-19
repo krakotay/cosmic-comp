@@ -67,6 +67,22 @@ impl Clients {
     fn get(&mut self, name: &UniqueName<'_>) -> &mut Client {
         self.0.entry(name.to_owned()).or_default()
     }
+
+    fn has_key_grab(
+        &self,
+        active_virtual_mods: &HashSet<Keysym>,
+        modifiers: &ModifiersState,
+        key: Keysym,
+    ) -> bool {
+        self.0
+            .values()
+            .flat_map(|client| &client.key_grabs)
+            .any(|grab| {
+                grab.mods == modifiers.serialized.depressed
+                    && &grab.virtual_mods == active_virtual_mods
+                    && grab.key == key
+            })
+    }
 }
 
 #[derive(Debug)]
@@ -139,20 +155,15 @@ impl A11yKeyboardMonitorState {
         self.clients
             .lock()
             .unwrap()
-            .0
-            .values()
-            .flat_map(|client| &client.key_grabs)
-            .any(|grab| {
-                grab.mods == modifiers.serialized.depressed
-                    && grab.virtual_mods == self.active_virtual_mods
-                    && grab.key == key
-            })
+            .has_key_grab(&self.active_virtual_mods, modifiers, key)
     }
 
     pub fn key_event(&self, modifiers: &ModifiersState, keysym: &KeysymHandle, state: KeyState) {
         let clients = self.clients.lock().unwrap();
+        let has_key_grab =
+            clients.has_key_grab(&self.active_virtual_mods, modifiers, keysym.modified_sym());
         for (unique_name, client) in clients.0.iter() {
-            if !client.watched && !self.has_key_grab(modifiers, keysym.modified_sym()) {
+            if !client.watched && !has_key_grab {
                 continue;
             }
 
@@ -300,4 +311,32 @@ impl KeyboardMonitor {
         unichar: u32,
         keycode: u16,
     ) -> zbus::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_grab_lookup_works_while_clients_are_locked() {
+        let clients = Arc::new(Mutex::new(Clients::default()));
+        let key = Keysym::from(42);
+        let mut modifiers = ModifiersState::default();
+        modifiers.serialized.depressed = 1;
+
+        {
+            let mut clients = clients.lock().unwrap();
+            clients
+                .get(&UniqueName::try_from(":1.42").unwrap())
+                .key_grabs
+                .push(KeyGrab {
+                    mods: 1,
+                    virtual_mods: HashSet::new(),
+                    key,
+                });
+        }
+
+        let clients = clients.lock().unwrap();
+        assert!(clients.has_key_grab(&HashSet::new(), &modifiers, key));
+    }
 }

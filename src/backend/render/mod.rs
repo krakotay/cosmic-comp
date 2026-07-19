@@ -15,7 +15,7 @@ use crate::{
     backend::{
         kms::render::gles::GbmGlowBackend,
         render::{
-            element::DamageElement,
+            element::{DamageElement, PostprocessRenderElement},
             shadow::{SHADOW_SHADER, ShadowShader},
             wayland::{
                 SurfaceRenderElement,
@@ -67,8 +67,7 @@ use smithay::{
             },
             gles::{
                 GlesError, GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
-                UniformName, UniformType,
-                element::{PixelShaderElement, TextureShaderElement},
+                UniformName, UniformType, element::PixelShaderElement,
             },
             glow::GlowRenderer,
             multigpu::{Error as MultiError, MultiFrame, MultiRenderer},
@@ -1345,7 +1344,7 @@ where
             let texture_geometry =
                 texture_elem.geometry(output.current_scale().fractional_scale().into());
             let elements = {
-                let texture_elem = TextureShaderElement::new(
+                let texture_elem = PostprocessRenderElement::new(
                     texture_elem,
                     postprocess_texture_shader.0.clone(),
                     vec![
@@ -1420,7 +1419,8 @@ where
                     frame,
                     output.current_transform(),
                     |buffer, renderer, offscreen, dt, age, additional_damage| {
-                        let old_len = if !additional_damage.is_empty() {
+                        let mut additional_damage_len = 0;
+                        if !additional_damage.is_empty() {
                             let area = output
                                 .current_mode()
                                 .ok_or(RenderError::OutputNoMode(OutputNoMode))
@@ -1433,8 +1433,7 @@ where
                                     }, /* TODO: Mode is Buffer..., why is this Physical in the first place */
                                 )?;
 
-                            let old_len = elements.len();
-                            let additional_damage_elements: Vec<_> = additional_damage
+                            let additional_damage_elements = additional_damage
                                 .into_iter()
                                 .map(|rect| {
                                     rect.to_f64()
@@ -1446,19 +1445,15 @@ where
                                         .to_i32_round()
                                 })
                                 .map(DamageElement::new)
-                                .collect();
-                            dt.damage_output(age, &additional_damage_elements)?;
-
-                            Some(old_len)
-                        } else {
-                            None
-                        };
-
-                        let res = dt.damage_output(age, &elements)?;
-
-                        if let Some(old_len) = old_len {
-                            elements.truncate(old_len);
+                                .map(CosmicElement::from)
+                                .collect::<Vec<_>>();
+                            additional_damage_len = additional_damage_elements.len();
+                            elements.splice(0..0, additional_damage_elements);
                         }
+
+                        let res = dt.damage_output(age, &elements);
+                        elements.drain(..additional_damage_len);
+                        let res = res?;
 
                         let mut sync = SyncPoint::default();
 
