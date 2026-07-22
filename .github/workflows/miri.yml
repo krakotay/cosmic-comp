@@ -1,0 +1,63 @@
+name: Miri
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Miri is only available on nightly. Pin it so manual runs stay reproducible.
+  RUSTUP_TOOLCHAIN: nightly-2026-07-20
+  # Strict provenance catches integer/pointer mistakes; keep full diagnostics in isolation mode.
+  MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-backtrace=full
+
+jobs:
+  miri:
+    name: cargo miri test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Cargo cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/miri
+          key: ${{ runner.os }}-miri-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev \
+            libgbm-dev \
+            libxkbcommon-dev \
+            libegl1-mesa-dev \
+            libwayland-dev \
+            libinput-dev \
+            libdbus-1-dev \
+            libsystemd-dev \
+            libseat-dev \
+            libdisplay-info-dev \
+            libpixman-1-dev
+
+      - name: Setup Rust and Miri
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri --component rust-src
+          rustup override set "$RUSTUP_TOOLCHAIN"
+          cargo miri setup
+
+      - name: cargo miri test
+        # Miri does not emulate Unix sockets. Normal CI still covers the two session socket tests.
+        run: cargo miri test --workspace --all-targets --no-fail-fast -- --skip session::tests
