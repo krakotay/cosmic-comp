@@ -74,8 +74,8 @@ use crate::{
     utils::{prelude::*, quirks::WORKSPACE_OVERVIEW_NAMESPACE},
     wayland::{
         handlers::{
-            toplevel_management::minimize_rectangle, xdg_activation::ActivationContext,
-            xdg_shell::popup::get_popup_toplevel,
+            image_copy_capture::SessionData, toplevel_management::minimize_rectangle,
+            xdg_activation::ActivationContext, xdg_shell::popup::get_popup_toplevel,
         },
         protocols::{
             toplevel_info::{
@@ -1636,7 +1636,31 @@ impl Common {
         if let Some(mut a11y_keyboard_monitor) = self.dbus_state.a11y_keyboard_monitor() {
             a11y_keyboard_monitor.refresh();
         }
+
+        // Protocol references keep session user data alive after the compositor-owned session
+        // has stopped. Release its full-size renderbuffer before pruning those references, then
+        // drain the GL deletion queue only after the current batch of input/events is handled.
+        let mut released_offscreen = false;
+        for session in self.image_copy_capture_state.sessions() {
+            if !session.alive()
+                && let Some(data) = session.user_data().get::<SessionData>()
+            {
+                released_offscreen |= data.lock().unwrap().offscreen.take().is_some();
+            }
+        }
+        for session in self.image_copy_capture_state.cursor_sessions() {
+            if !session.alive()
+                && let Some(data) = session.user_data().get::<SessionData>()
+            {
+                released_offscreen |= data.lock().unwrap().offscreen.take().is_some();
+            }
+        }
         self.image_copy_capture_state.cleanup();
+        if released_offscreen {
+            self.event_loop_handle.insert_idle(|state| {
+                state.backend.cleanup_renderer_caches();
+            });
+        }
     }
 
     pub fn refresh_idle_inhibit(&mut self) {
@@ -2617,6 +2641,16 @@ impl Shell {
             .retain(|pending| pending.surface.alive());
         self.pending_windows
             .retain(|pending| pending.surface.alive());
+        self.pending_activations.retain(|key, _| match key {
+            ActivationKey::Wayland(surface) => surface.alive(),
+            ActivationKey::X11(window_id) => self.pending_windows.iter().any(|pending| {
+                pending
+                    .surface
+                    .x11_surface()
+                    .is_some_and(|surface| surface.window_id() == *window_id)
+            }),
+        });
+        self.resize_state.take_if(|(target, ..)| !target.alive());
     }
 
     pub fn update_pointer_position(&mut self, location: Point<f64, Local>, output: &Output) {

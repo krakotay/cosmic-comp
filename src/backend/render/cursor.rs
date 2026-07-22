@@ -78,26 +78,30 @@ impl Cursor {
         Cursor { icons, size }
     }
 
-    pub fn get_image(&self, scale: u32, millis: u32) -> Image {
+    pub fn get_image(&self, scale: u32, millis: u32) -> &Image {
+        self.get_image_with_index(scale, millis).1
+    }
+
+    fn get_image_with_index(&self, scale: u32, millis: u32) -> (usize, &Image) {
         let size = self.size * scale;
         frame(millis, size, &self.icons)
     }
 }
 
-fn nearest_images(size: u32, images: &[Image]) -> impl Iterator<Item = &Image> {
+fn nearest_images(size: u32, images: &[Image]) -> impl Iterator<Item = (usize, &Image)> {
     // Follow the nominal size of the cursor to choose the nearest
     let nearest_image = images
         .iter()
         .min_by_key(|image| u32::abs_diff(size, image.size))
         .unwrap();
 
-    images.iter().filter(move |image| {
+    images.iter().enumerate().filter(move |(_, image)| {
         image.width == nearest_image.width && image.height == nearest_image.height
     })
 }
 
-fn frame(mut millis: u32, size: u32, images: &[Image]) -> Image {
-    let total = nearest_images(size, images).fold(0, |acc, image| acc + image.delay);
+fn frame(mut millis: u32, size: u32, images: &[Image]) -> (usize, &Image) {
+    let total = nearest_images(size, images).fold(0, |acc, (_, image)| acc + image.delay);
 
     if total == 0 {
         millis = 0;
@@ -105,14 +109,52 @@ fn frame(mut millis: u32, size: u32, images: &[Image]) -> Image {
         millis %= total;
     }
 
-    for img in nearest_images(size, images) {
+    for (idx, img) in nearest_images(size, images) {
         if millis <= img.delay {
-            return img.clone();
+            return (idx, img);
         }
         millis -= img.delay;
     }
 
     unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(size: u32, width: u32, height: u32, delay: u32) -> Image {
+        Image {
+            size,
+            width,
+            height,
+            xhot: 0,
+            yhot: 0,
+            delay,
+            pixels_rgba: vec![],
+            pixels_argb: vec![],
+        }
+    }
+
+    #[test]
+    fn frame_borrows_the_nearest_theme_image() {
+        let images = [image(24, 24, 24, 1), image(48, 48, 48, 1)];
+
+        let (idx, selected) = frame(0, 40, &images);
+
+        assert_eq!(idx, 1);
+        assert!(std::ptr::eq(selected, &images[1]));
+    }
+
+    #[test]
+    fn frame_preserves_animated_image_identity() {
+        let images = [image(32, 64, 64, 10), image(32, 64, 64, 10)];
+
+        let (idx, selected) = frame(11, 32, &images);
+
+        assert_eq!(idx, 1);
+        assert!(std::ptr::eq(selected, &images[1]));
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -264,8 +306,7 @@ pub struct CursorStateInner {
     cursor_size: u32,
 
     cursors: HashMap<CursorIcon, Cursor>,
-    current_image: Option<Image>,
-    image_cache: Vec<(Image, MemoryRenderBuffer)>,
+    image_cache: HashMap<(CursorIcon, usize), MemoryRenderBuffer>,
 
     hidden: bool,
     idle_timer: Option<RegistrationToken>,
@@ -318,8 +359,7 @@ impl Default for CursorStateInner {
             cursor_theme: theme,
 
             cursors: HashMap::new(),
-            current_image: None,
-            image_cache: Vec::new(),
+            image_cache: HashMap::new(),
 
             hidden: false,
             idle_timer: None,
@@ -364,30 +404,28 @@ pub fn draw_cursor<R>(
         }
 
         let integer_scale = (scale.x.max(scale.y) * buffer_scale).ceil() as u32;
-        let frame = state
-            .get_named_cursor(current_cursor)
-            .get_image(integer_scale, time.as_millis());
-        let actual_scale = (frame.size / state.size()).max(1);
+        let cursor_theme = &state.cursor_theme;
+        let cursor_size = state.cursor_size;
+        let cursor = state
+            .cursors
+            .entry(current_cursor)
+            .or_insert_with(|| Cursor::load(cursor_theme, current_cursor, cursor_size));
+        let (frame_idx, frame) = cursor.get_image_with_index(integer_scale, time.as_millis());
+        let actual_scale = (frame.size / cursor_size).max(1);
 
-        let pointer_images = &mut state.image_cache;
-        let maybe_image = pointer_images
-            .iter()
-            .find_map(|(image, texture)| if image == &frame { Some(texture) } else { None });
-        let pointer_image = match maybe_image {
-            Some(image) => image,
-            None => {
-                let buffer = MemoryRenderBuffer::from_slice(
+        let pointer_image = state
+            .image_cache
+            .entry((current_cursor, frame_idx))
+            .or_insert_with(|| {
+                MemoryRenderBuffer::from_slice(
                     &frame.pixels_rgba,
                     Fourcc::Argb8888,
                     (frame.width as i32, frame.height as i32),
                     actual_scale as i32,
                     Transform::Normal,
                     None,
-                );
-                pointer_images.push((frame.clone(), buffer));
-                pointer_images.last().map(|(_, i)| i).unwrap()
-            }
-        };
+                )
+            });
 
         let hotspot = Point::<i32, BufferCoords>::from((frame.xhot as i32, frame.yhot as i32))
             .to_logical(
@@ -395,8 +433,6 @@ pub fn draw_cursor<R>(
                 Transform::Normal,
                 &Size::from((frame.width as i32, frame.height as i32)),
             );
-        state.current_image = Some(frame);
-
         push(
             CursorRenderElement::Static(
                 MemoryRenderBufferRenderElement::from_buffer(

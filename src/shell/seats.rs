@@ -401,9 +401,8 @@ impl SeatExt for Seat<State> {
                 let seat_userdata = self.user_data();
                 seat_userdata.insert_if_missing_threadsafe(CursorState::default);
                 let state = seat_userdata.get::<CursorState>().unwrap();
+                let mut state = state.lock().unwrap();
                 let frame = state
-                    .lock()
-                    .unwrap()
                     .get_named_cursor(cursor_icon)
                     .get_image(1, time.as_millis());
 

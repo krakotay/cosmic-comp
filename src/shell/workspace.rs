@@ -485,6 +485,7 @@ impl Workspace {
     pub fn refresh(&mut self) {
         self.fullscreen_surfaces.retain(|w| w.alive());
         self.minimized_windows.retain(|w| w.alive());
+        self.focus_stack.retain_alive();
         self.floating_layer.refresh();
         self.tiling_layer.refresh();
     }
@@ -1979,6 +1980,13 @@ impl Workspace {
 }
 
 impl FocusStacks {
+    fn retain_alive(&mut self) {
+        self.0.retain(|_, stack| {
+            stack.retain(FocusTarget::alive);
+            !stack.is_empty()
+        });
+    }
+
     pub fn get<'a>(&'a self, seat: &Seat<State>) -> FocusStack<'a> {
         FocusStack(self.0.get(seat))
     }

@@ -266,12 +266,12 @@ impl XWaylandState {
             let cursor = Cursor::load(&theme, CursorIcon::Default, size);
             let image = cursor.get_image(scale.ceil() as u32, 0);
 
-            let (pixels_rgba, size, hotspot) = match scale_cursor(scale, size, &image) {
+            let (pixels_rgba, size, hotspot) = match scale_cursor(scale, size, image) {
                 Ok(x) => x,
                 Err(err) => {
                     warn!("Failed to scale Xwayland cursor image: {}", err);
                     (
-                        image.pixels_rgba,
+                        image.pixels_rgba.clone(),
                         Size::from((image.width as u16, image.height as u16)),
                         Point::from((image.xhot as u16, image.yhot as u16)),
                     )

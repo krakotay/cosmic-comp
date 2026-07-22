@@ -44,11 +44,13 @@ pub struct ImageCopySessions {
 pub trait SessionHolder {
     fn add_session(&mut self, session: Session);
     fn remove_session(&mut self, session: &SessionRef);
-    fn sessions(&self) -> Vec<SessionRef>;
+    fn has_sessions(&self) -> bool;
 
     fn add_cursor_session(&mut self, session: CursorSession);
     fn remove_cursor_session(&mut self, session: &CursorSessionRef);
-    fn cursor_sessions(&self) -> Vec<CursorSessionRef>;
+    fn has_cursor_sessions(&self) -> bool;
+    /// Visit sessions without allocating a temporary collection or cloning protocol references.
+    fn for_each_cursor_session(&self, f: impl FnMut(&CursorSessionRef));
 }
 
 pub trait FrameHolder {
@@ -79,17 +81,10 @@ impl SessionHolder for Output {
             .retain(|s| s != session);
     }
 
-    fn sessions(&self) -> Vec<SessionRef> {
+    fn has_sessions(&self) -> bool {
         self.user_data()
             .get::<ImageCopySessionsData>()
-            .map_or(Vec::new(), |sessions| {
-                sessions
-                    .borrow()
-                    .sessions
-                    .iter()
-                    .map(|s| (*s).clone())
-                    .collect()
-            })
+            .is_some_and(|sessions| !sessions.borrow().sessions.is_empty())
     }
 
     fn add_cursor_session(&mut self, session: CursorSession) {
@@ -112,17 +107,18 @@ impl SessionHolder for Output {
             .retain(|s| s != session);
     }
 
-    fn cursor_sessions(&self) -> Vec<CursorSessionRef> {
+    fn has_cursor_sessions(&self) -> bool {
         self.user_data()
             .get::<ImageCopySessionsData>()
-            .map_or(Vec::new(), |sessions| {
-                sessions
-                    .borrow()
-                    .cursor_sessions
-                    .iter()
-                    .map(|s| (*s).clone())
-                    .collect()
-            })
+            .is_some_and(|sessions| !sessions.borrow().cursor_sessions.is_empty())
+    }
+
+    fn for_each_cursor_session(&self, mut f: impl FnMut(&CursorSessionRef)) {
+        if let Some(sessions) = self.user_data().get::<ImageCopySessionsData>() {
+            for session in &sessions.borrow().cursor_sessions {
+                f(session);
+            }
+        }
     }
 }
 
@@ -168,12 +164,8 @@ impl SessionHolder for Workspace {
     fn remove_session(&mut self, session: &SessionRef) {
         self.image_copy.sessions.retain(|s| s != session);
     }
-    fn sessions(&self) -> Vec<SessionRef> {
-        self.image_copy
-            .sessions
-            .iter()
-            .map(|s| (*s).clone())
-            .collect()
+    fn has_sessions(&self) -> bool {
+        !self.image_copy.sessions.is_empty()
     }
 
     fn add_cursor_session(&mut self, session: CursorSession) {
@@ -183,12 +175,14 @@ impl SessionHolder for Workspace {
     fn remove_cursor_session(&mut self, session: &CursorSessionRef) {
         self.image_copy.cursor_sessions.retain(|s| s != session);
     }
-    fn cursor_sessions(&self) -> Vec<CursorSessionRef> {
-        self.image_copy
-            .cursor_sessions
-            .iter()
-            .map(|s| (*s).clone())
-            .collect()
+    fn has_cursor_sessions(&self) -> bool {
+        !self.image_copy.cursor_sessions.is_empty()
+    }
+
+    fn for_each_cursor_session(&self, mut f: impl FnMut(&CursorSessionRef)) {
+        for session in &self.image_copy.cursor_sessions {
+            f(session);
+        }
     }
 }
 
@@ -212,17 +206,10 @@ impl SessionHolder for CosmicSurface {
             .sessions
             .retain(|s| s != session);
     }
-    fn sessions(&self) -> Vec<SessionRef> {
+    fn has_sessions(&self) -> bool {
         self.user_data()
             .get::<ImageCopySessionsData>()
-            .map_or(Vec::new(), |sessions| {
-                sessions
-                    .borrow()
-                    .sessions
-                    .iter()
-                    .map(|s| (*s).clone())
-                    .collect()
-            })
+            .is_some_and(|sessions| !sessions.borrow().sessions.is_empty())
     }
 
     fn add_cursor_session(&mut self, session: CursorSession) {
@@ -245,16 +232,17 @@ impl SessionHolder for CosmicSurface {
             .retain(|s| s != session);
     }
 
-    fn cursor_sessions(&self) -> Vec<CursorSessionRef> {
+    fn has_cursor_sessions(&self) -> bool {
         self.user_data()
             .get::<ImageCopySessionsData>()
-            .map_or(Vec::new(), |sessions| {
-                sessions
-                    .borrow()
-                    .cursor_sessions
-                    .iter()
-                    .map(|s| (*s).clone())
-                    .collect()
-            })
+            .is_some_and(|sessions| !sessions.borrow().cursor_sessions.is_empty())
+    }
+
+    fn for_each_cursor_session(&self, mut f: impl FnMut(&CursorSessionRef)) {
+        if let Some(sessions) = self.user_data().get::<ImageCopySessionsData>() {
+            for session in &sessions.borrow().cursor_sessions {
+                f(session);
+            }
+        }
     }
 }

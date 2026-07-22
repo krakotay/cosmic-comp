@@ -649,9 +649,9 @@ impl State {
                     );
 
                     if output != current_output {
-                        for session in cursor_sessions_for_output(&shell, &current_output) {
+                        for_each_cursor_session_for_output(&shell, &current_output, |session| {
                             session.set_cursor_pos(None);
-                        }
+                        });
                         seat.set_active_output(&output);
                     }
 
@@ -2477,19 +2477,15 @@ impl State {
 }
 
 // Output and workspace sessions for the given output
-fn cursor_sessions_for_output<'a>(
-    shell: &'a Shell,
-    output: &'a Output,
-) -> impl Iterator<Item = CursorSessionRef> + 'a {
-    shell
-        .active_space(output)
-        .into_iter()
-        .flat_map(|workspace| {
-            workspace
-                .cursor_sessions()
-                .into_iter()
-                .chain(output.cursor_sessions())
-        })
+fn for_each_cursor_session_for_output(
+    shell: &Shell,
+    output: &Output,
+    mut f: impl FnMut(&CursorSessionRef),
+) {
+    if let Some(workspace) = shell.active_space(output) {
+        workspace.for_each_cursor_session(&mut f);
+    }
+    output.for_each_cursor_session(&mut f);
 }
 
 fn transform_output_mapped_position<B, E>(
@@ -2540,17 +2536,24 @@ pub fn update_output_image_copy_cursor_position(
     position: Point<f64, Global>,
 ) {
     let output_geometry = output.geometry();
-    for session in cursor_sessions_for_output(&shell, &output) {
-        if let Some(cursor_geometry) = seat.cursor_geometry(
-            (position - output_geometry.loc.to_f64())
-                .as_logical()
-                .to_buffer(
-                    output.current_scale().fractional_scale(),
-                    output.current_transform(),
-                    &output_geometry.size.to_f64().as_logical(),
-                ),
-            clock.now(),
-        ) {
+    let mut cursor_geometry = None;
+    let mut cursor_geometry_initialized = false;
+    for_each_cursor_session_for_output(shell, output, |session| {
+        if !cursor_geometry_initialized {
+            cursor_geometry = seat.cursor_geometry(
+                (position - output_geometry.loc.to_f64())
+                    .as_logical()
+                    .to_buffer(
+                        output.current_scale().fractional_scale(),
+                        output.current_transform(),
+                        &output_geometry.size.to_f64().as_logical(),
+                    ),
+                clock.now(),
+            );
+            cursor_geometry_initialized = true;
+        }
+
+        if let Some(cursor_geometry) = cursor_geometry {
             let constraints = cursor_capture_constraints(Some(cursor_geometry));
             if session
                 .current_constraints()
@@ -2562,5 +2565,5 @@ pub fn update_output_image_copy_cursor_position(
             session.set_cursor_hotspot(cursor_geometry.hotspot);
             session.set_cursor_pos(Some(cursor_geometry.geometry.loc));
         }
-    }
+    });
 }

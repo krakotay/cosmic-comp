@@ -43,11 +43,12 @@ use smithay::{
         allocator::{Fourcc, dmabuf::Dmabuf},
         drm::DrmNode,
         renderer::{
-            ImportDma,
+            ImportDma, Renderer,
             element::{
                 RenderElementState, RenderElementStates, default_primary_scanout_output_compare,
                 utils::select_dmabuf_feedback,
             },
+            multigpu::ApiDevice,
         },
     },
     desktop::{
@@ -423,6 +424,46 @@ impl BackendData {
             BackendData::Winit(winit) => Ok(RendererRef::Glow(winit.backend.renderer())),
             BackendData::X11(x11) => Ok(RendererRef::Glow(&mut x11.renderer)),
             _ => unreachable!("No backend set when getting offscreen renderer"),
+        }
+    }
+
+    /// Drain resources whose last owner was an infrequently-used offscreen renderer.
+    pub fn cleanup_renderer_caches(&mut self) {
+        match self {
+            BackendData::Kms(kms) => {
+                if let Some(renderer) = kms.software_renderer.as_mut()
+                    && let Err(err) = renderer.cleanup_texture_cache()
+                {
+                    warn!(?err, "Failed to drain software renderer cleanup queue");
+                }
+
+                match kms.api.devices_mut() {
+                    Ok(devices) => {
+                        for device in devices {
+                            if let Err(err) = device.renderer_mut().cleanup_texture_cache() {
+                                warn!(?err, "Failed to drain offscreen renderer cleanup queue");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            "Failed to enumerate offscreen render devices for cleanup"
+                        )
+                    }
+                }
+            }
+            BackendData::Winit(winit) => {
+                if let Err(err) = winit.backend.renderer().cleanup_texture_cache() {
+                    warn!(?err, "Failed to drain winit renderer cleanup queue");
+                }
+            }
+            BackendData::X11(x11) => {
+                if let Err(err) = x11.renderer.cleanup_texture_cache() {
+                    warn!(?err, "Failed to drain X11 renderer cleanup queue");
+                }
+            }
+            BackendData::Unset => {}
         }
     }
 
@@ -1300,7 +1341,7 @@ impl Common {
         const SCREENCOPY_THROTTLE: Option<Duration> = Some(Duration::from_nanos(16_666_666));
 
         fn throttle(session_holder: &impl SessionHolder) -> Option<Duration> {
-            if session_holder.sessions().is_empty() && session_holder.cursor_sessions().is_empty() {
+            if !session_holder.has_sessions() && !session_holder.has_cursor_sessions() {
                 THROTTLE
             } else {
                 SCREENCOPY_THROTTLE

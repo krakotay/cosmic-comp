@@ -1389,6 +1389,8 @@ impl FloatingLayout {
     #[profiling::function]
     pub fn refresh(&mut self) {
         self.space.refresh();
+        self.animations.retain(|mapped, _| mapped.alive());
+        self.hovered_stack.take_if(|(mapped, _)| !mapped.alive());
 
         if let Some(pos) = self.spawn_order.iter().position(|w| !w.alive()) {
             self.spawn_order.truncate(pos);

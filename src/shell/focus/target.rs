@@ -239,8 +239,7 @@ impl PointerFocusTarget {
         let Some(toplevel) = self.toplevel(&data.common.shell.read()) else {
             return;
         };
-        let cursor_sessions = toplevel.cursor_sessions();
-        if cursor_sessions.is_empty() {
+        if !toplevel.has_cursor_sessions() {
             return;
         }
 
@@ -280,10 +279,10 @@ impl PointerFocusTarget {
             Point::from((0, 0))
         };
 
-        for session in cursor_sessions {
+        toplevel.for_each_cursor_session(|session| {
             session.set_cursor_pos(cursor_pos);
             session.set_cursor_hotspot(cursor_hotspot);
-        }
+        });
     }
 }
 
@@ -420,10 +419,10 @@ impl PointerTarget<State> for PointerFocusTarget {
     fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: u32) {
         let toplevel = self.toplevel(&data.common.shell.read());
         if let Some(element) = toplevel {
-            for session in element.cursor_sessions() {
+            element.for_each_cursor_session(|session| {
                 session.set_cursor_pos(None);
                 session.set_cursor_hotspot((0, 0));
-            }
+            });
         }
 
         self.inner_pointer_target().leave(seat, data, serial, time);
